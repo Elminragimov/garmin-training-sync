@@ -26,9 +26,39 @@ jobs:
 
 
       
-      - name: Check Garmin activities commands
+      
+      - name: Inspect Garmin activities
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
         run: |
-          gc-personal activities --help
+          python - <<'PY'
+          import json
+          import subprocess
+
+          result = subprocess.run(
+              ["gc-personal", "--quiet", "activities", "--limit", "3"],
+              capture_output=True,
+              text=True,
+              check=True
+          )
+
+          activities = json.loads(result.stdout)
+
+          print("Response type:", type(activities).__name__)
+
+          if isinstance(activities, dict):
+              print("Top-level keys:", list(activities.keys()))
+              for key in ("activities", "data", "results"):
+                  if isinstance(activities.get(key), list):
+                      activities = activities[key]
+                      break
+
+          if isinstance(activities, list):
+              print("Activities found:", len(activities))
+              for activity in activities:
+                  if isinstance(activity, dict):
+                      print("Activity fields:", sorted(activity.keys()))
+          PY
 
 
 

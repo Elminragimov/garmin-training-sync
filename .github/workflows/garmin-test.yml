@@ -25,9 +25,11 @@ jobs:
           echo "Garmin API connection OK"
 
 
+      
       - name: Check Garmin activities commands
         run: |
-          gc-personal --help
+          gc-personal activities --help
+
 
 
       - name: Test Google Sheets connection

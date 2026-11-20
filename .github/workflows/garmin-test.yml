@@ -23,3 +23,46 @@ jobs:
         run: |
           gc-personal --quiet profile-settings > /dev/null
           echo "Garmin API connection OK"
+
+      - name: Test Google Sheets connection
+        env:
+          GOOGLE_SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
+          GOOGLE_SYNC_TOKEN: ${{ secrets.GOOGLE_SYNC_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          import json
+          import urllib.request
+
+          url = os.environ["GOOGLE_SCRIPT_URL"]
+          token = os.environ["GOOGLE_SYNC_TOKEN"]
+
+          payload = json.dumps({
+              "token": token,
+              "activities": []
+          }).encode("utf-8")
+
+          request = urllib.request.Request(
+              url,
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          with urllib.request.urlopen(request, timeout=30) as response:
+              result = json.loads(response.read().decode("utf-8"))
+
+          if result.get("ok") is not True:
+              raise RuntimeError(
+                  "Google Sheets connection failed: "
+                  + str(result.get("error", "Unknown error"))
+              )
+
+          print("Google Sheets connection OK")
+          print("Activities added:", result.get("added"))
+          PY
+
+
+
+
+

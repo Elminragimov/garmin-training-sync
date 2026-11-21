@@ -12,6 +12,10 @@ jobs:
           python-version: "3.12"
       - name: Install Garmin client
         run: pip install garmin-connect-personal-api-python
-      - name: Show supported CLI commands
+      - name: Inspect recovery command arguments
         run: |
-          gc-personal --help
+          for command in sleep-summaries hrv-summaries daily-summaries body-battery stress weight-measurements; do
+            echo "::group::$command"
+            gc-personal "$command" --help
+            echo "::endgroup::"
+          done

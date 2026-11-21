@@ -25,73 +25,106 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install isolated Garmin client
-        run: python -m pip install garmin-connect-personal-api-python
+      - name: Install isolated Garmin and FIT clients
+        run: python -m pip install garmin-connect-personal-api-python fitparse==1.2.0
 
-      - name: Inspect activity and download interface without exposing payloads
+      - name: Download one activity and inspect FIT structure
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
           ACTIVITY_ID: ${{ inputs.activity_id }}
         shell: bash
         run: |
           python - <<'PY'
-          import json
+          from collections import Counter, defaultdict
+          from datetime import datetime
+          from io import BytesIO
+          from pathlib import Path
           import os
           import re
           import subprocess
-          import sys
+          import tempfile
+          import zipfile
+
+          from fitparse import FitFile
 
           activity_id = os.environ["ACTIVITY_ID"]
           if not re.fullmatch(r"[0-9]{5,20}", activity_id):
               raise ValueError("activity_id must be numeric")
+          if not os.environ.get("GARMIN_PERSONAL_API_KEY"):
+              raise RuntimeError("Garmin API key is missing")
 
-          def run(args):
-              return subprocess.run(
-                  ["gc-personal", "--quiet", *args],
-                  capture_output=True, text=True, timeout=90, check=False
+          with tempfile.TemporaryDirectory(prefix="garmin-fit-probe-") as tmp:
+              directory = Path(tmp)
+              output = directory / "activity_export"
+              command = [
+                  "gc-personal", "--quiet", "activity-download",
+                  "-o", str(output), activity_id
+              ]
+              result = subprocess.run(
+                  command, cwd=directory, capture_output=True,
+                  text=True, timeout=120, check=False
               )
+              print("Download command succeeded:", result.returncode == 0)
+              if result.returncode != 0:
+                  # Never echo raw CLI stderr/stdout (may contain sensitive data).
+                  raise RuntimeError("Garmin activity download failed; output suppressed")
 
-          # Print only structural metadata; never print Garmin response bodies.
-          result = run(["activity", activity_id])
-          print("Activity detail command succeeded:", result.returncode == 0)
-          if result.returncode == 0:
-              try:
-                  payload = json.loads(result.stdout)
-                  if isinstance(payload, dict):
-                      print("Activity response keys:", sorted(payload.keys()))
-                      for key in ("activityId", "activityType", "startTimeGMT",
-                                  "startTimeLocal", "duration", "distance"):
-                          if key in payload:
-                              value = payload[key]
-                              if key == "activityType" and isinstance(value, dict):
-                                  value = sorted(value.keys())
-                              print(f"{key}: {value}")
-                  else:
-                      print("Activity response type:", type(payload).__name__)
-              except json.JSONDecodeError:
-                  print("Activity output is not JSON; content suppressed")
-          else:
-              print("Activity detail failed; stderr suppressed to protect credentials")
+              files = [
+                  p for p in directory.rglob("*")
+                  if p.is_file() and not p.is_symlink()
+              ]
+              print("Downloaded file count:", len(files))
+              if not files:
+                  raise RuntimeError("Download returned no files")
 
-          # Inspect CLI usage before attempting FIT download. The installed
-          # version may change its accepted flags, so no unverified call is made.
-          help_result = run(["activity-download", "--help"])
-          print("Download command help succeeded:", help_result.returncode == 0)
-          if help_result.returncode == 0:
-              lines = help_result.stdout.splitlines()
-              safe = [line.strip() for line in lines
-                      if "usage:" in line.lower() or
-                      ("--" in line and not any(
-                          word in line.lower() for word in
-                          ("token", "secret", "password", "key")
-                      ))]
-              print("Download CLI interface:")
-              for line in safe[:35]:
-                  print(line[:220])
-          else:
-              print("Download help unavailable; output suppressed")
+              fit_bytes = []
+              max_size = 100 * 1024 * 1024
+              for path in files:
+                  if path.stat().st_size > max_size:
+                      raise RuntimeError("Export exceeds diagnostic size limit")
+                  data = path.read_bytes()
+                  if zipfile.is_zipfile(BytesIO(data)):
+                      with zipfile.ZipFile(BytesIO(data)) as archive:
+                          for info in archive.infolist():
+                              if info.is_dir() or not info.filename.lower().endswith(".fit"):
+                                  continue
+                              if info.file_size > max_size:
+                                  raise RuntimeError("FIT member exceeds size limit")
+                              fit_bytes.append(archive.read(info))
+                  elif len(data) >= 12 and data[8:12] == b".FIT":
+                      fit_bytes.append(data)
 
-          # This first-stage workflow does not upload to Sheets or save files.
-          if result.returncode != 0:
-              sys.exit(1)
+              print("FIT files detected:", len(fit_bytes))
+              if not fit_bytes:
+                  raise RuntimeError("No FIT data found in Garmin export")
+
+              for file_number, data in enumerate(fit_bytes, 1):
+                  counts = Counter()
+                  fields = defaultdict(set)
+                  first_timestamps = {}
+                  # In-memory parsing only; no FIT file or records are uploaded.
+                  for message in FitFile(BytesIO(data)).get_messages():
+                      name = message.name
+                      counts[name] += 1
+                      if name in ("lap", "record", "session", "event",
+                                  "activity", "sport", "zones_target"):
+                          for field in message:
+                              if field.name:
+                                  fields[name].add(field.name)
+                              if (field.name == "timestamp"
+                                      and isinstance(field.value, datetime)
+                                      and name not in first_timestamps):
+                                  first_timestamps[name] = field.value.isoformat()
+
+                  print(f"FIT file {file_number}: message counts:",
+                        dict(sorted(counts.items())))
+                  for name in ("lap", "record", "session", "event",
+                               "activity", "sport", "zones_target"):
+                      print(f"FIT file {file_number} {name} fields:",
+                            sorted(fields[name]))
+                      if name in first_timestamps:
+                          print(f"FIT file {file_number} {name} first timestamp:",
+                                first_timestamps[name])
+
+              print("Read-only FIT diagnostics completed")
           PY

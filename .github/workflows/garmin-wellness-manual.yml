@@ -1,0 +1,117 @@
+name: Manual Garmin wellness sync
+on:
+  workflow_dispatch:
+
+jobs:
+  wellness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Garmin client
+        run: pip install garmin-connect-personal-api-python==1.1.0
+      - name: Sync last three completed days
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          GOOGLE_SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
+          GOOGLE_SYNC_TOKEN: ${{ secrets.GOOGLE_SYNC_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, urllib.request
+          from datetime import date, timedelta
+
+          end = date.today() - timedelta(days=1)
+          start = end - timedelta(days=2)
+          args = ["--start-date", start.isoformat(), "--end-date", end.isoformat()]
+
+          def fetch(command):
+              result = subprocess.run(
+                  ["gc-personal", "--quiet", command, *args],
+                  capture_output=True, text=True, timeout=90, check=True
+              )
+              return json.loads(result.stdout)
+
+          def numeric(value):
+              if isinstance(value, bool) or not isinstance(value, (int, float)):
+                  return None
+              return value
+
+          def field(value, *keys):
+              for key in keys:
+                  if not isinstance(value, dict):
+                      return None
+                  value = value.get(key)
+              return numeric(value)
+
+          rows = {
+              (start + timedelta(days=i)).isoformat(): {"date": (start + timedelta(days=i)).isoformat()}
+              for i in range(3)
+          }
+
+          sleep = fetch("sleep-summaries")
+          hrv = fetch("hrv-summaries")
+          daily = fetch("daily-summaries")
+
+          if not isinstance(sleep, list):
+              raise RuntimeError("Unexpected sleep schema")
+          if not isinstance(hrv, dict) or not isinstance(hrv.get("hrvSummaries"), list):
+              raise RuntimeError("Unexpected HRV schema")
+          if not isinstance(daily, dict) or not isinstance(daily.get("data"), list):
+              raise RuntimeError("Unexpected daily schema")
+
+          for item in sleep:
+              day = item.get("calendarDate")
+              if day not in rows:
+                  continue
+              seconds = field(item, "sleepTimeSeconds")
+              if seconds is not None and seconds >= 0:
+                  rows[day]["sleep_hours"] = round(seconds / 3600, 2)
+              score = field(item, "sleepScores", "overall", "value")
+              if score is not None:
+                  rows[day]["sleep_score"] = score
+
+          for item in hrv["hrvSummaries"]:
+              day = item.get("calendarDate")
+              if day in rows:
+                  value = field(item, "lastNightAvg")
+                  if value is not None:
+                      rows[day]["hrv_ms"] = value
+
+          for item in daily["data"]:
+              day = item.get("calendarDate")
+              if day not in rows:
+                  continue
+              mapping = {
+                  "resting_hr": ("heartRate", "restingValue"),
+                  "body_battery": ("bodyBattery", "maxValue"),
+                  "stress": ("stress", "avgLevel"),
+              }
+              for target, path in mapping.items():
+                  value = field(item, *path)
+                  if value is not None:
+                      rows[day][target] = value
+
+          records = [row for row in rows.values() if len(row) > 1]
+          print("Days with available recovery metrics:", len(records))
+          print("Available metric names:", sorted(set().union(*(set(r) - {"date"} for r in records))) if records else [])
+          if not records:
+              raise RuntimeError("No recovery metrics returned; nothing uploaded")
+
+          payload = json.dumps({
+              "token": os.environ["GOOGLE_SYNC_TOKEN"],
+              "wellness": records
+          }).encode("utf-8")
+          request = urllib.request.Request(
+              os.environ["GOOGLE_SCRIPT_URL"],
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+          with urllib.request.urlopen(request, timeout=60) as response:
+              result = json.loads(response.read().decode("utf-8"))
+          if result.get("ok") is not True:
+              raise RuntimeError("Wellness sync rejected: " + str(result.get("error", "unknown")))
+          print("Wellness rows added:", result.get("wellness_added"))
+          print("Wellness rows updated:", result.get("wellness_updated"))
+          PY

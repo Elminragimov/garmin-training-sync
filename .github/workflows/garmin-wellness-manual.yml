@@ -100,8 +100,10 @@ jobs:
 
           payload = json.dumps({
               "token": os.environ["GOOGLE_SYNC_TOKEN"],
+              "activities": [],
               "wellness": records
-          }).encode("utf-8")
+               }).encode("utf-8")
+          
           request = urllib.request.Request(
               os.environ["GOOGLE_SCRIPT_URL"],
               data=payload,

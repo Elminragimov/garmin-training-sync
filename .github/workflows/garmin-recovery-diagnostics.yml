@@ -12,10 +12,48 @@ jobs:
           python-version: "3.12"
       - name: Install Garmin client
         run: pip install garmin-connect-personal-api-python
-      - name: Inspect recovery command arguments
+      - name: Inspect private recovery response structure
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
         run: |
-          for command in sleep-summaries hrv-summaries daily-summaries body-battery stress weight-measurements; do
-            echo "::group::$command"
-            gc-personal "$command" --help
-            echo "::endgroup::"
-          done
+          python - <<'PY'
+          import json, subprocess
+          from datetime import date, timedelta
+
+          end = date.today() - timedelta(days=1)
+          start = end - timedelta(days=2)
+          print("Requested days:", 3)
+
+          for command in (
+              "sleep-summaries", "hrv-summaries",
+              "daily-summaries", "body-battery", "stress"
+          ):
+              args = [
+                  "gc-personal", "--quiet", command,
+                  "--start-date", start.isoformat(),
+                  "--end-date", end.isoformat()
+              ]
+              result = subprocess.run(
+                  args, capture_output=True, text=True, timeout=90
+              )
+              if result.returncode:
+                  print(command, "FAILED; exit code:", result.returncode)
+                  continue
+              try:
+                  obj = json.loads(result.stdout)
+              except ValueError:
+                  print(command, "non-JSON response")
+                  continue
+              print(command, "type:", type(obj).__name__)
+              if isinstance(obj, list):
+                  print(command, "records:", len(obj))
+                  if obj and isinstance(obj[0], dict):
+                      print(command, "first-record keys:", sorted(obj[0].keys()))
+              elif isinstance(obj, dict):
+                  print(command, "top-level keys:", sorted(obj.keys()))
+                  for key, value in obj.items():
+                      if isinstance(value, list):
+                          print(command, "list field:", key, "length:", len(value))
+                          if value and isinstance(value[0], dict):
+                              print(command, key, "first-record keys:", sorted(value[0].keys()))
+          PY

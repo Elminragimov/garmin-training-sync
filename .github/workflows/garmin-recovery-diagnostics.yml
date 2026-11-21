@@ -1,0 +1,17 @@
+name: Inspect Garmin recovery commands
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Garmin client
+        run: pip install garmin-connect-personal-api-python
+      - name: Show supported CLI commands
+        run: |
+          gc-personal --help

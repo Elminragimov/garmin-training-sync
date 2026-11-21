@@ -1,0 +1,97 @@
+name: Garmin FIT capability diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      activity_id:
+        description: "Garmin activity ID to inspect (read-only)"
+        required: true
+        default: "23318941398"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: garmin-fit-diagnostics
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install isolated Garmin client
+        run: python -m pip install garmin-connect-personal-api-python
+
+      - name: Inspect activity and download interface without exposing payloads
+        env:
+          GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
+          ACTIVITY_ID: ${{ inputs.activity_id }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          activity_id = os.environ["ACTIVITY_ID"]
+          if not re.fullmatch(r"[0-9]{5,20}", activity_id):
+              raise ValueError("activity_id must be numeric")
+
+          def run(args):
+              return subprocess.run(
+                  ["gc-personal", "--quiet", *args],
+                  capture_output=True, text=True, timeout=90, check=False
+              )
+
+          # Print only structural metadata; never print Garmin response bodies.
+          result = run(["activity", activity_id])
+          print("Activity detail command succeeded:", result.returncode == 0)
+          if result.returncode == 0:
+              try:
+                  payload = json.loads(result.stdout)
+                  if isinstance(payload, dict):
+                      print("Activity response keys:", sorted(payload.keys()))
+                      for key in ("activityId", "activityType", "startTimeGMT",
+                                  "startTimeLocal", "duration", "distance"):
+                          if key in payload:
+                              value = payload[key]
+                              if key == "activityType" and isinstance(value, dict):
+                                  value = sorted(value.keys())
+                              print(f"{key}: {value}")
+                  else:
+                      print("Activity response type:", type(payload).__name__)
+              except json.JSONDecodeError:
+                  print("Activity output is not JSON; content suppressed")
+          else:
+              print("Activity detail failed; stderr suppressed to protect credentials")
+
+          # Inspect CLI usage before attempting FIT download. The installed
+          # version may change its accepted flags, so no unverified call is made.
+          help_result = run(["activity-download", "--help"])
+          print("Download command help succeeded:", help_result.returncode == 0)
+          if help_result.returncode == 0:
+              lines = help_result.stdout.splitlines()
+              safe = [line.strip() for line in lines
+                      if "usage:" in line.lower() or
+                      ("--" in line and not any(
+                          word in line.lower() for word in
+                          ("token", "secret", "password", "key")
+                      ))]
+              print("Download CLI interface:")
+              for line in safe[:35]:
+                  print(line[:220])
+          else:
+              print("Download help unavailable; output suppressed")
+
+          # This first-stage workflow does not upload to Sheets or save files.
+          if result.returncode != 0:
+              sys.exit(1)
+          PY

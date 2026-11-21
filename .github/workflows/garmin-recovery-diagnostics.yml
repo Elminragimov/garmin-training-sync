@@ -12,7 +12,7 @@ jobs:
           python-version: "3.12"
       - name: Install Garmin client
         run: pip install garmin-connect-personal-api-python
-      - name: Inspect private recovery response structure
+      - name: Inspect recovery nested field schemas
         env:
           GARMIN_PERSONAL_API_KEY: ${{ secrets.GARMIN_PERSONAL_API_KEY }}
         run: |
@@ -20,40 +20,41 @@ jobs:
           import json, subprocess
           from datetime import date, timedelta
 
-          end = date.today() - timedelta(days=1)
-          start = end - timedelta(days=2)
-          print("Requested days:", 3)
-
-          for command in (
-              "sleep-summaries", "hrv-summaries",
-              "daily-summaries", "body-battery", "stress"
-          ):
-              args = [
-                  "gc-personal", "--quiet", command,
-                  "--start-date", start.isoformat(),
-                  "--end-date", end.isoformat()
-              ]
-              result = subprocess.run(
-                  args, capture_output=True, text=True, timeout=90
+          day = (date.today() - timedelta(days=1)).isoformat()
+          def get(command):
+              proc = subprocess.run(
+                  ["gc-personal", "--quiet", command,
+                   "--start-date", day, "--end-date", day],
+                  capture_output=True, text=True, timeout=90, check=True
               )
-              if result.returncode:
-                  print(command, "FAILED; exit code:", result.returncode)
-                  continue
-              try:
-                  obj = json.loads(result.stdout)
-              except ValueError:
-                  print(command, "non-JSON response")
-                  continue
-              print(command, "type:", type(obj).__name__)
-              if isinstance(obj, list):
-                  print(command, "records:", len(obj))
-                  if obj and isinstance(obj[0], dict):
-                      print(command, "first-record keys:", sorted(obj[0].keys()))
-              elif isinstance(obj, dict):
-                  print(command, "top-level keys:", sorted(obj.keys()))
-                  for key, value in obj.items():
-                      if isinstance(value, list):
-                          print(command, "list field:", key, "length:", len(value))
-                          if value and isinstance(value[0], dict):
-                              print(command, key, "first-record keys:", sorted(value[0].keys()))
+              return json.loads(proc.stdout)
+
+          def schema(label, value):
+              if isinstance(value, dict):
+                  print(label, "object keys:", sorted(value.keys()))
+                  for k, v in value.items():
+                      print(label + "." + k, "type:", type(v).__name__)
+                      if isinstance(v, dict):
+                          print(label + "." + k, "nested keys:", sorted(v.keys()))
+              elif isinstance(value, list):
+                  print(label, "list length:", len(value))
+                  if value:
+                      print(label, "first element type:", type(value[0]).__name__)
+                      if isinstance(value[0], dict):
+                          print(label, "first element keys:", sorted(value[0].keys()))
+                      elif isinstance(value[0], list):
+                          print(label, "first element length:", len(value[0]))
+                          print(label, "first element types:", [type(v).__name__ for v in value[0]])
+              else:
+                  print(label, "type:", type(value).__name__)
+
+          sleep = get("sleep-summaries")
+          if sleep: schema("sleepScores", sleep[0].get("sleepScores"))
+          daily = get("daily-summaries").get("data", [])
+          if daily:
+              for key in ("heartRate", "stress", "bodyBattery"):
+                  schema("daily." + key, daily[0].get(key))
+          battery = get("body-battery")
+          if battery:
+              schema("battery.values", battery[0].get("bodyBatteryValuesArray"))
           PY
